@@ -1,0 +1,13 @@
+{
+  "name": "antena-cine-sync",
+  "version": "1.0.0",
+  "description": "Servidor de WebSockets",
+  "main": "antena.js",
+  "scripts": {
+    "start": "node antena.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  }
+}
