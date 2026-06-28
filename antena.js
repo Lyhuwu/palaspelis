@@ -1,83 +1,133 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const cors = require('cors');
+const { initializeApp } = require('firebase/app');
+const { getDatabase, ref, runTransaction, push, set } = require('firebase/database');
 
+// ==========================================
+// 1. CONFIGURACIÓN DE FIREBASE
+// ==========================================
+const firebaseConfig = {
+    apiKey: "AIzaSyD5L51DKMU8ozgN8wTt9WATlgzjI7lQ2Ls",
+    authDomain: "monkeycine.firebaseapp.com",
+    projectId: "monkeycine",
+    storageBucket: "monkeycine.firebasestorage.app",
+    messagingSenderId: "134472914894",
+    appId: "1:134472914894:web:df59027eb99b5c05207d9f"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getDatabase(firebaseApp);
+
+// ==========================================
+// 2. INICIALIZACIÓN DEL SERVIDOR
+// ==========================================
 const app = express();
-app.use(cors());
-
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: { origin: "*" }
 });
 
-// Estructura: { nombreSala: { host: socketId, usuarios: Map(socketId -> nombre) } }
+// Memoria volátil para controlar quién es el Líder
 const salas = {};
 
+app.get('/', (req, res) => {
+    res.send('📡 Antena Monkeycine V3 operando al 100%');
+});
+
+// ==========================================
+// 3. LÓGICA DE SOCKETS Y BASE DE DATOS
+// ==========================================
 io.on('connection', (socket) => {
-    let miSala = null;
-    let miNombre = '';
+    console.log('🔗 Nuevo usuario conectado:', socket.id);
 
+    // UNIRSE A LA SALA Y BLINDAR EL ROL DE LÍDER
     socket.on('unirse_sala', (data) => {
-        const { sala, nombre } = data;
-        miSala = sala;
-        miNombre = nombre;
-        socket.join(sala);
+        const nombreSala = data.sala;
+        socket.join(nombreSala);
 
-        if (!salas[sala]) {
-            salas[sala] = { host: socket.id, usuarios: new Map() };
-        }
-        salas[sala].usuarios.set(socket.id, nombre);
-
-        const esHost = salas[sala].host === socket.id;
-        socket.emit('asignar_rol', { rol: esHost ? 'host' : 'guest' });
-
-        io.to(sala).emit('recibir_mensaje', {
-            texto: `✨ ${nombre} acaba de entrar a la sala ✨`,
-            sistema: true
-        });
-    });
-
-    // Sincronización continua enviada por el Host
-    socket.on('sync_continua', (estado) => {
-        if (salas[miSala] && salas[miSala].host === socket.id) {
-            // Retransmitimos el estado exacto del host a todos los guests en la sala
-            socket.to(miSala).emit('estado_host', estado);
+        // Si la sala no existe o está vacía, el primero en llegar es el Líder
+        if (!salas[nombreSala]) {
+            salas[nombreSala] = { hostId: socket.id };
+            socket.emit('asignar_rol', { rol: 'host' });
+            console.log(`👑 ${data.nombre} es ahora el Líder de la sala: ${nombreSala}`);
+        } else {
+            // Si ya hay líder, automáticamente es invitado, sin importar su nombre
+            socket.emit('asignar_rol', { rol: 'guest' });
+            console.log(`👥 ${data.nombre} entró como invitado a: ${nombreSala}`);
         }
     });
 
-    // Chat
+    // SISTEMA DE REPRODUCCIÓN (No se toca)
+    socket.on('sync_continua', (data) => {
+        // Obtenemos en qué sala está este socket
+        const sala = Array.from(socket.rooms)[1]; 
+        if (sala && salas[sala] && salas[sala].hostId === socket.id) {
+            socket.to(sala).emit('estado_host', data);
+        }
+    });
+
     socket.on('enviar_mensaje', (data) => {
-        socket.to(data.sala).emit('recibir_mensaje', {
-            texto: data.texto,
-            remitente: miNombre
+        io.to(data.sala).emit('recibir_mensaje', { 
+            remitente: data.texto.split(':')[1] || "Usuario", 
+            texto: data.texto 
         });
     });
 
-    socket.on('disconnect', () => {
-        if (!miSala || !salas[miSala]) return;
+    // ==========================================
+    // FASE 3 (V3): INTERACCIONES CON FIREBASE
+    // ==========================================
 
-        salas[miSala].usuarios.delete(socket.id);
+    // 1. Procesar Monkeyabacho
+    socket.on('v3_enviar_abacho', (data) => {
+        // Rebotar la señal a la otra persona para que vibre su celular
+        io.to(data.sala).emit('v3_recibir_abacho', { de: data.de });
+        
+        // Sumar +1 al contador histórico en Firebase
+        const contadorRef = ref(db, 'estadisticas/total_abachos');
+        runTransaction(contadorRef, (actual) => {
+            return (actual || 0) + 1;
+        });
+        console.log(`🫂 Monkeyabacho registrado de ${data.de}`);
+    });
 
-        io.to(miSala).emit('recibir_mensaje', {
-            texto: `❌ ${miNombre} se ha desconectado.`,
-            sistema: true
+    // 2. Guardar Momento
+    socket.on('v3_guardar_momento', (data) => {
+        const momentosRef = ref(db, 'momentos_guardados');
+        const nuevoMomentoRef = push(momentosRef); // Crea un ID único automático
+        set(nuevoMomentoRef, data).then(() => {
+            console.log(`📸 Momento guardado exitosamente: ${data.pelicula}`);
+        }).catch(err => console.error("Error guardando momento:", err));
+    });
+
+    // 3. Registrar Fin de Película/Capítulo
+    socket.on('v3_fin_pelicula', (data) => {
+        // Guardar en el historial completo
+        const historialRef = ref(db, 'historial_vistas');
+        push(historialRef, {
+            ...data,
+            fecha: new Date().toISOString()
         });
 
-        // Lógica de reasignación de Host si el Host se fue
-        if (salas[miSala].host === socket.id) {
-            if (salas[miSala].usuarios.size > 0) {
-                const nuevoHostId = Array.from(salas[miSala].usuarios.keys())[0];
-                salas[miSala].host = nuevoHostId;
-                const nombreNuevoHost = salas[miSala].usuarios.get(nuevoHostId);
-                
-                io.to(nuevoHostId).emit('asignar_rol', { rol: 'host' });
-                io.to(miSala).emit('recibir_mensaje', {
-                    texto: `👑 ${nombreNuevoHost} es el nuevo Host de la sala.`,
-                    sistema: true
-                });
-            } else {
-                delete salas[miSala]; // Destruir sala si está vacía
+        // Sumar +1 al contador de películas
+        const pelisRef = ref(db, 'estadisticas/total_peliculas');
+        runTransaction(pelisRef, (actual) => {
+            return (actual || 0) + 1;
+        });
+        console.log(`🏁 Película terminada registrada: ${data.pelicula}`);
+    });
+
+    // ==========================================
+    // 4. LIMPIEZA AL DESCONECTAR
+    // ==========================================
+    socket.on('disconnect', () => {
+        console.log('❌ Usuario desconectado:', socket.id);
+        // Si el que se desconectó era el Líder, eliminamos la sala de la memoria 
+        // para que la próxima persona en refrescar la página pueda ser Líder.
+        for (const sala in salas) {
+            if (salas[sala].hostId === socket.id) {
+                delete salas[sala];
+                console.log(`🧹 La sala ${sala} se ha quedado sin líder y fue reseteada.`);
             }
         }
     });
@@ -85,5 +135,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Antena Cine Sync encendida en el puerto ${PORT}`);
+    console.log(`🚀 Servidor Monkeycine V3 encendido en el puerto ${PORT}`);
 });
