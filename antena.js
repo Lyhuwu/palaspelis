@@ -28,7 +28,6 @@ const io = new Server(server, {
     cors: { origin: "*" }
 });
 
-// Memoria volátil para controlar quién es el Líder
 const salas = {};
 
 app.get('/', (req, res) => {
@@ -44,32 +43,30 @@ io.on('connection', (socket) => {
     // UNIRSE A LA SALA Y BLINDAR EL ROL DE LÍDER
     socket.on('unirse_sala', (data) => {
         const nombreSala = data.sala;
+        socket.nombre = data.nombre; // Guardamos tu nombre en la memoria del servidor
         socket.join(nombreSala);
 
-        // Si la sala no existe o está vacía, el primero en llegar es el Líder
         if (!salas[nombreSala]) {
             salas[nombreSala] = { hostId: socket.id };
             socket.emit('asignar_rol', { rol: 'host' });
             console.log(`👑 ${data.nombre} es ahora el Líder de la sala: ${nombreSala}`);
         } else {
-            // Si ya hay líder, automáticamente es invitado, sin importar su nombre
             socket.emit('asignar_rol', { rol: 'guest' });
             console.log(`👥 ${data.nombre} entró como invitado a: ${nombreSala}`);
         }
     });
 
-    // SISTEMA DE REPRODUCCIÓN (No se toca)
     socket.on('sync_continua', (data) => {
-        // Obtenemos en qué sala está este socket
         const sala = Array.from(socket.rooms)[1]; 
         if (sala && salas[sala] && salas[sala].hostId === socket.id) {
             socket.to(sala).emit('estado_host', data);
         }
     });
 
+    // SISTEMA DE MENSAJES SIN ECO (Usa broadcast)
     socket.on('enviar_mensaje', (data) => {
-        io.to(data.sala).emit('recibir_mensaje', { 
-            remitente: data.texto.split(':')[1] || "Usuario", 
+        socket.broadcast.to(data.sala).emit('recibir_mensaje', { 
+            remitente: socket.nombre || "Alguien", 
             texto: data.texto 
         });
     });
@@ -78,43 +75,32 @@ io.on('connection', (socket) => {
     // FASE 3 (V3): INTERACCIONES CON FIREBASE
     // ==========================================
 
-    // 1. Procesar Monkeyabacho
     socket.on('v3_enviar_abacho', (data) => {
-        // Rebotar la señal a la otra persona para que vibre su celular
         io.to(data.sala).emit('v3_recibir_abacho', { de: data.de });
         
-        // Sumar +1 al contador histórico en Firebase
         const contadorRef = ref(db, 'estadisticas/total_abachos');
         runTransaction(contadorRef, (actual) => {
             return (actual || 0) + 1;
         });
-        console.log(`🫂 Monkeyabacho registrado de ${data.de}`);
     });
 
-    // 2. Guardar Momento
     socket.on('v3_guardar_momento', (data) => {
         const momentosRef = ref(db, 'momentos_guardados');
-        const nuevoMomentoRef = push(momentosRef); // Crea un ID único automático
-        set(nuevoMomentoRef, data).then(() => {
-            console.log(`📸 Momento guardado exitosamente: ${data.pelicula}`);
-        }).catch(err => console.error("Error guardando momento:", err));
+        const nuevoMomentoRef = push(momentosRef); 
+        set(nuevoMomentoRef, data).catch(err => console.error("Error guardando momento:", err));
     });
 
-    // 3. Registrar Fin de Película/Capítulo
     socket.on('v3_fin_pelicula', (data) => {
-        // Guardar en el historial completo
         const historialRef = ref(db, 'historial_vistas');
         push(historialRef, {
             ...data,
             fecha: new Date().toISOString()
         });
 
-        // Sumar +1 al contador de películas
         const pelisRef = ref(db, 'estadisticas/total_peliculas');
         runTransaction(pelisRef, (actual) => {
             return (actual || 0) + 1;
         });
-        console.log(`🏁 Película terminada registrada: ${data.pelicula}`);
     });
 
     // ==========================================
@@ -122,12 +108,9 @@ io.on('connection', (socket) => {
     // ==========================================
     socket.on('disconnect', () => {
         console.log('❌ Usuario desconectado:', socket.id);
-        // Si el que se desconectó era el Líder, eliminamos la sala de la memoria 
-        // para que la próxima persona en refrescar la página pueda ser Líder.
         for (const sala in salas) {
             if (salas[sala].hostId === socket.id) {
                 delete salas[sala];
-                console.log(`🧹 La sala ${sala} se ha quedado sin líder y fue reseteada.`);
             }
         }
     });
